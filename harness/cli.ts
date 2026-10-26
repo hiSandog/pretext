@@ -29,13 +29,14 @@
 //   --scale=<n>              Chrome and Firefox at device scale factor n; --zoom=<n>: Chrome at page zoom n
 //   --browser=ios --runtime="iOS 26.0"   Safari in a simulator of that runtime, booted for each job, deleted after it
 //   --store=<dir>            the folder these runs keep recordings and lists in, .artifacts/harness-store by default
+// A flag or an argument its command doesn't read stops the run. --help prints this header.
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import {
   accept, attribute, behaviourLine, buildChange, checkBlocks, commitSeed, countBehaviour, countDraw, countedFailures, countedOnly, countedTallies, countWidths, drawRows, freshRecordings,
   gateBlocks, gateSample, headline, judge,
-  observable, outsideClaims, percent, pinning, reverseOrder, score, SEED, shown, shrinkWrapShort, tableLines, weightedShare, WIDTH_STEPS, widthBand, widthShares,
+  observable, outsideClaims, percent, pinning, reverseOrder, score, SEED, shown, shrinkWrapShort, tableLines, weightedShare, WIDTH_STEPS, widthBand, widthShares, widthsOff,
   type Behaviour, type Draw, type Outcome, type Pinning, type Stratum, type WidthTally,
 } from './score.ts'
 import { bench, benchOptions } from './bench/run.ts'
@@ -65,15 +66,63 @@ const FRESH_AT_MOST = 30
 export type Options = { lib: string; seed: number; sample: number | null; accept: string; partial: boolean; onlyNew: boolean }
 export type Args = { command: string | undefined; positional: string[]; browsers: BrowserKind[]; cases: string | null; options: Options; flags: Map<string, string>; root: string }
 
+// The flags each command reads, beside the ones every command takes. A flag its command doesn't read stops the run
+// before a browser starts. Such a flag used to be dropped without a word, so `record --onlynew` recorded every case
+// again over the checked-in recordings, `check --help` and `equal main --ofline` started three browsers,
+// `bench main --row=new` timed every row, and `explain --text=… --whitespace=pre-wrap` explained the paragraph under
+// `white-space: normal`. repin reads --seed for installed Safari's sample.
+const SHARED: readonly string[] = ['browser', 'cases', 'lib', 'scale', 'zoom', 'runtime', 'store', 'help']
+const FLAGS = new Map<string, readonly string[]>([
+  ['record', ['only-new', 'sample', 'seed']], ['check', ['accept']], ['gate', ['accept', 'sample', 'seed']], ['equal', ['offline']],
+  ['bench', ['sessions', 'rows', 'quick', 'foreground']], ['repin', ['write', 'seed']],
+  ['explain', ['text', 'width', 'font', 'lang', 'white-space', 'word-break', 'letter-spacing']],
+])
+// The flags that take no value, written --name. Every other flag takes one, written --name=value. A flag written the
+// other way stops the run as an unread flag does: bare, `check --accept` wrote neither list and said nothing,
+// `gate --sample` read 0 and recorded no case again and `gate --seed` drew with seed 0, and
+// `repin chrome --write=false` wrote.
+const SWITCHES: readonly string[] = ['only-new', 'offline', 'quick', 'foreground', 'write', 'help']
+// The flags whose value may be empty: explain's --lang= is a page and a paragraph with no language, as the sample's
+// draws of a page without one are (sets/sample.ts).
+const EMPTY: readonly string[] = ['lang']
+// The commands that take one argument beside their flags: equal's ref, bench's base, repin's browser and explain's
+// case. Any other argument stops the run as an unread flag does: dropped, `check chrome` and `check -h` ran in three
+// browsers, and `gate --sample 10` read --sample as 0 and recorded no case again.
+const ARGUMENT: readonly string[] = ['equal', 'bench', 'repin', 'explain']
+
+// What --help, no command and an unknown command print: this file's header.
+function usage(): string {
+  const lines = readFileSync(import.meta.path, 'utf8').split('\n')
+  return lines.slice(0, lines.findIndex(line => !line.startsWith('//'))).map(line => line.slice(3)).join('\n')
+}
+
 export function parseArgs(args: readonly string[]): Args {
   const flags = new Map<string, string>()
+  // The flags written with no =, which the map can't tell from --name= with nothing after it.
+  const bare = new Set<string>()
   const positional: string[] = []
   for (let i = 0; i < args.length; i++) {
     const match = /^--([a-z-]+)(?:=(.*))?$/s.exec(args[i]!)
-    if (match === null) positional.push(args[i]!)
-    else flags.set(match[1]!, match[2] ?? '')
+    if (match !== null) {
+      flags.set(match[1]!, match[2] ?? '')
+      if (match[2] === undefined) bare.add(match[1]!)
+      else bare.delete(match[1]!)
+    } else if (args[i]!.startsWith('--')) throw new Error(`${args[i]} isn't a flag: a flag's name is lowercase letters and hyphens, as in --only-new`)
+    else positional.push(args[i]!)
   }
   const command = positional[0]
+  const reads = command === undefined ? undefined : FLAGS.get(command)
+  if (reads !== undefined) {
+    for (const name of flags.keys()) {
+      if (!reads.includes(name) && !SHARED.includes(name)) throw new Error(`${command} reads no --${name}; it reads ${reads.concat(SHARED).map(flag => `--${flag}`).join(', ')}`)
+    }
+    const extra = positional[ARGUMENT.includes(command!) ? 2 : 1]
+    if (extra !== undefined) throw new Error(`${command} takes no ${extra}: a flag is written --name or --name=value, as in --browser=chrome`)
+    for (const [name, value] of flags) {
+      const isSwitch = SWITCHES.includes(name)
+      if (isSwitch ? !bare.has(name) : bare.has(name) || (value === '' && !EMPTY.includes(name))) throw new Error(isSwitch ? `--${name} takes no value: it is written --${name}` : `--${name} takes a value: it is written --${name}=value`)
+    }
+  }
   const browserFlag = flags.get('browser') ?? (command === 'explain' ? 'chrome' : 'all')
   const browsers: BrowserKind[] = browserFlag === 'all' ? BROWSERS.filter(browser => BROWSER[browser].background) : browserFlag.split(',') as BrowserKind[]
   for (let i = 0; i < browsers.length; i++) if (!BROWSERS.includes(browsers[i]!)) throw new Error(`Unknown browser ${browsers[i]}`)
@@ -285,7 +334,7 @@ export async function check(browser: BrowserKind, cases: Case[], o: Options, io:
       draws.push({ group: c.sample.group, weight: c.sample.weight, pass, inClaims: outside === null, wrapped, height: pass || outcome.status === 'breaks' })
       sampleWeight += c.sample.weight
       if (c.sample.standIn === true) standInWeight += c.sample.weight
-      countDraw(table, drawRows(c, outside), pass, wrapped, short)
+      countDraw(table, drawRows(c, outside), pass, wrapped, short, pass && widthsOff(c, recording, prediction))
       if (outside !== null) outsideReasons.add(outside)
       else if (pass) countWidths(sampleWidths, recording, prediction, wholePixels)
     }
@@ -322,7 +371,7 @@ export async function check(browser: BrowserKind, cases: Case[], o: Options, io:
     out.push(`  real-usage sample, in claims: ${claimed === null ? '-' : `${percent(claimed.share, 1)} of real paragraphs right, ${interval(claimed)}`} (${draws.length} draws, ${percent(standInWeight, sampleWeight)} of their weight stand-ins; ${BROWSER[browser].phone ? 'a simulator\'s' : 'macOS'} rendering only; the intervals cover sampling error alone, not the guesses among weights.json's shares)`)
     out.push(`    where the browser wraps, ${weightedShare(draws, draw => draw.inClaims, draw => draw.wrapped)} of that weight: ${weightedShare(draws, draw => draw.wrapped && draw.inClaims, draw => draw.pass)} right`)
     out.push(`    a wrong line count or no prediction, so a wrong height: ${weightedShare(draws, draw => draw.inClaims, draw => !draw.height)} of real paragraphs`)
-    out.push('    draws counted one each, whatever their weight (wrapped: the browser lays the draw out on more than one line; narrow: it passes, and a box as wide as its widest predicted line, rounded up, is narrower than the browser\'s widest line):')
+    out.push('    draws counted one each, whatever their weight (wrapped: the browser lays the draw out on more than one line; narrow: it passes, and a box as wide as its widest predicted line, rounded up, is narrower than the browser\'s widest line; off: it passes, is plain text, and has a line predicted more than 1 px wider or narrower than the browser\'s):')
     out.push(...tableLines(table).map(line => `      ${line}`))
   }
   for (const [set, list] of [...behaviours].sort((x, y) => (x[0] < y[0] ? -1 : 1))) out.push(`  ${behaviourLine(set, list)}`)
@@ -665,6 +714,10 @@ async function explain(browser: BrowserKind, c: Case, recording: Recording | und
 
 async function main(): Promise<number> {
   const { command, positional, browsers, cases: file, options: o, flags, root } = parseArgs(process.argv.slice(2))
+  if (flags.has('help')) {
+    console.log(usage())
+    return 0
+  }
   const dir = join(import.meta.dir, 'cases')
   const { cases, sets } = loadCases(file !== null ? [file] : readdirSync(dir).filter(name => name.endsWith('.ndjson')).sort().map(name => join(dir, name)))
   if (flags.has('scale')) setup.scale = Number(flags.get('scale'))
@@ -727,7 +780,7 @@ async function main(): Promise<number> {
       return 0
     }
     default:
-      console.error('Usage: bun harness record|check|gate|equal <ref>|bench <base>|repin <browser>|explain <id>|explain --text=... [--browser=...] [--cases=...] [--lib=...]')
+      console.error(usage())
       return 2
   }
 }

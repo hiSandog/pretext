@@ -10,7 +10,7 @@ pins).
 
 ## Setup
 
-- `bun install`, then `bun test`, which runs the harness's offline tests with no browser.
+- `bun install`, then `bun test --parallel`, which runs the harness's offline tests with no browser.
 - Chrome and Firefox run as pinned copies of the installed apps, kept in `~/github/browser-engines/apps` (or the folder
   `HARNESS_APPS` names) and named in `pins.json`. `bun harness repin chrome` or `repin firefox` copies the installed app
   there; `--write` makes the copy the pin.
@@ -85,9 +85,11 @@ by `check` a line a kind, but one that fails needs no accepted entry and no reas
   on one line, which nearly always pass, so `check` prints the share right where the browser wraps, and the share with
   a wrong line count, the wrong height a virtualized list would get. Then a table counts draws one each, by script and
   by style (letter spacing, soft hyphens, pre-wrap, keep-all, rich inline, emoji): draws and failures, the same among
-  the draws the browser wraps, and the passing draws that fail the shrink-wrap check. A row's rate doesn't move with
-  the share `weights.json` gives its script or style, though the mix inside the row still follows the weights. Read the
-  worst rows with the headline: easy kinds flatter a pooled number (`RESEARCH.md`, Evaluation Traps).
+  the draws the browser wraps, the passing draws that fail the shrink-wrap check, and the passing draws of plain text
+  with a line predicted more than 1 px wider or narrower than the browser's (`off`), which pass on widths that aren't
+  the browser's. A row's rate doesn't move with the share `weights.json` gives its script or style, though the mix
+  inside the row still follows the weights. Read the worst rows with the headline: easy kinds flatter a pooled number
+  (`RESEARCH.md`, Evaluation Traps).
 - **The behaviour catalog** (`catalog`, `facts`, `rich`) answers which behaviours we model; deduplicated by what the
   browsers do, its size says nothing about real use. `check` prints first the count over a behaviour's cases at 24 px
   and wider, among the behaviours that have one there, away from the edges, that the browser lays out on more than one
@@ -102,7 +104,7 @@ by `check` a line a kind, but one that fails needs no accepted entry and no reas
 | `sample.ndjson` | The real-usage sample | `make.ts write` |
 | `reports.ndjson` | Filed reports with the text, font and width as filed (`sets/exact.ts`) | `make.ts write` |
 | `catalog.ndjson` | Families of templates, from the engines' rules, the UAX #14 classes between the scripts apps mix, the shapes `ENGINE_FOLLOWUPS.md` names, bidi controls where Firefox's line breaking looks past them, CJK marks Chrome halts next to other punctuation, letter-spaced words whose ligatures the browsers turn off, emoji characters a named font draws itself and one word wider than its line, kerned or joined, that each browser cuts between letters its own way, plus adversarial `main/*` cases taken from the old test suite | the width search |
-| `facts.ndjson` | The engine facts `src/layout.test.ts` checks on plain text, in a browser | the width search |
+| `facts.ndjson` | The engine facts `src/layout.test.ts` checked on plain text when each was added, in a browser; a unit test that alone caught no planted defect has since been taken out | the width search |
 | `rich.ndjson` | Rich-inline paragraphs: styled runs, span edges, chips, padded code spans, boxes (an empty inline-block of a width and a height, top-aligned), the shapes whose lines changed when items began to continue the line (#369), keep-all and pre-wrap paragraphs, fullwidth punctuation at an item's edge, a line's return from an unfit soft hyphen to a break between two text segments, a lone carriage return at an item's edge, a line separator that ends an item before white space, paragraphs narrower than 1px, searched from 0px, and characters of no width, a tab, a hyphen or U+3000 at an item's edge, where rich inline has the browsers' lines and where it doesn't, plus `main/*` cases | the width search |
 | `census.ndjson`, `books.ndjson`, `smoke.ndjson` | Real paragraphs of `corpora/` at several widths, and whole books, from the per-engine rebuild | taken once |
 | `oracles.ndjson` | The mode oracles (pre-wrap, keep-all, symbols, letter spacing, soft hyphens) the old test suite ran | taken once |
@@ -185,10 +187,14 @@ name the fonts they run in where that isn't 16px Arial. A fact added after them 
 that added or last changed the fact, which this paragraph names, since a later merge moves the test and a case's family
 and origin keep the line: line 1000 at dbfab0de (#399), Firefox's white space around bidi controls, line 2140 at
 785e5af2 (#446), Chrome's return from an unfit hyphen to a break between two text segments, whose second row runs in
-16px Hiragino Sans, and line 1575 at f2e54d1b (#455), the WebKit profile's lone carriage return, which runs in 16px
+16px Hiragino Sans, line 1575 at f2e54d1b (#455), the WebKit profile's lone carriage return, which runs in 16px
 Menlo alone: there Safari gives the carriage return a character's width, the profile gives it none, and of
 webkit-host's six failures at 24 px and wider the two away from an edge are accepted and the four at one counted
-(`RESEARCH.md`, Decisions Log, 2026-10-06). Such a fact also names the
+(`RESEARCH.md`, Decisions Log, 2026-10-06), line 5959 at c3e28361 (#525), a zero-width space after content that
+doesn't fit its line, whose rows of a letter wider than its line run in 40px Arial, the size the fact names, so that
+the letter is wider than a line of 24 px, and line 1320 at 474acee6 (#525), two zero-width spaces before a tab that
+doesn't fit, between which no line ends, so that Firefox's line keeps both with the letter before them. Such a fact
+also names the
 paragraph directions it runs in where a browser's lines turn on them (the first of those, both). The facts set has no
 cover, so it keeps the width where a template's words join, which the catalog's cover drops once a narrower change has
 shown that kind of break: a fact that rests on a line's width, such as one space against two, goes there.
@@ -220,9 +226,9 @@ paragraph given with `--text`, line by line against the browser.
 
 `accepted/<browser>.txt` holds the blocking cases main has failed since #340, each under a written reason: the gate
 protects what main passes since #340, whose break rules port the engines' own, not what main before #340 passed by
-accident. A listed case that passes again or is gone blocks until `check --accept` takes it off, so a fix gets recorded.
-A lost pass isn't a regression until it's attributed: a true loss, two errors that cancelled, or a bad test or
-recording.
+accident. A listed case that passes again or is gone blocks until `check --accept="<reason>"` takes it off, so a fix
+gets recorded. A lost pass isn't a regression until it's attributed: a true loss, two errors that cancelled, or a bad
+test or recording.
 
 A reason isn't always a cause. The reasons #340's failures were accepted under name a shape of input and say that the
 browser breaks there otherwise ("Arabic and Hebrew beside brackets, controls, U+FFFC or rich-item edges, at 24 px and
@@ -231,12 +237,12 @@ Firefox's 244 and 118 of webkit-host's 165 (2026-10-11). Those entries are untra
 the browser's rule, or says that it isn't traced.
 
 `counted/<browser>.txt` holds the failing cases that don't block (What a case is and when it passes), each under why it
-is counted: under 24 px, an edge of a line change, outside the claims, old-gate. `check --accept` writes it, and nobody
-writes a reason into it. `check` prints how many of each kind pass and fail and, against the list, the failures it
-lacks and its entries that no longer fail (`since the list: +3, -0`); `equal` shows which cases moved between two
-builds. A change that moves a counted case owes nothing for it: no attribution, no reason, and `check` stays green. One
-that moves a blocking case owes what it always did. Until 2026-10-11 every pinned case blocked, and the counted
-failures were 9,822 of the three browsers' 10,545 accepted entries.
+is counted: under 24 px, an edge of a line change, outside the claims, old-gate. `check --accept="<reason>"` writes it,
+and nobody writes a reason into it. `check` prints how many of each kind pass and fail and, against the list, the
+failures it lacks and its entries that no longer fail (`since the list: +3, -0`); `equal` shows which cases moved
+between two builds. A change that moves a counted case owes nothing for it: no attribution, no reason, and `check` stays
+green. One that moves a blocking case owes what it always did. Until 2026-10-11 every pinned case blocked, and the
+counted failures were 9,822 of the three browsers' 10,545 accepted entries.
 
 `varying/<browser>.txt` lists predictions that move with the browser's state, between runs (`runs`, never judged) or
 with what was predicted before (`order`, judged in their own order). A lone prediction can't tell the library's caches
@@ -275,15 +281,15 @@ harness/invariants.test.ts`) and the bench's floors.
   fail on shaping, painting or string storage. Every stand-in font kerns the space, and kana on a context under
   `optimizeLegibility`, so offline the Chromium profile never takes the path of a font that kerns nothing with
   either, which `src/layout.test.ts` and the browsers run.
-- Without the invariants' desktop user agent and string `letterSpacing` (`invariants.ts`), a planted defect in reusing
-  a prepared handle went unseen in 500 draws.
 - Without the stand-in's kerning and ligatures between neighbouring letters (#435), every word measured as its letters
   do alone, so the fits of a word cut between letters all gave one answer: a planted defect that overwrote the advances
   a held handle keeps when its word was fit another way went unseen in 600 draws of every profile. With them, the
-  unknown profile, whose context takes no `letterSpacing`, fails it in 84 draws of 600. The WebKit profile's takes none
-  either, and it failed in 1 of the 600 drawn before the cut-word cases joined the sets and in none of those drawn
-  since; the Blink and Gecko profiles measure letter-spaced text apart, so no word there is fit two ways. A planted miss
-  of a line-start width in `layout()`'s count fails the Blink profile's agreement check in 3 draws of 600.
+  unknown profile, whose context takes no `letterSpacing`, fails it in 84 draws of 600. The WebKit profile measures
+  letter-spaced text with the rest too, its context taking none when this was run and, since the profile asks Canvas
+  how many letter spacings a grapheme takes, one that keeps the ligatures, as Safari's does; it failed in 1 of the 600
+  drawn before the cut-word cases joined the sets and in none of those drawn since. The Blink and Gecko profiles
+  measure letter-spaced text apart, so no word there is fit two ways. A planted miss of a line-start width in
+  `layout()`'s count fails the Blink profile's agreement check in 3 draws of 600.
 - The stand-in halts a closing fullwidth mark by a few tenths of a pixel, so almost no line there fits only by a halt:
   with the halt that a mark at a rich item's end keeps on a line with content (`itemEndHalts`) taken out of the walker,
   0 of 21,251 inputs differed in every profile (2026-10-07). A change to that rule rests on the unit tests and on
@@ -308,8 +314,9 @@ claims rest on these ratios; nothing timed is checked in.
   build against itself.
 - **What to paste.** The output ends with one line that names the builds, how they were timed and how many entries
   read slower, faster and within noise, then each entry that read slower or faster, or a line that says none did. A
-  pull request quotes those lines and gives each entry there a sentence. Main against itself is called on none to two
-  of a run's 192 entries, so a call counts when the change runs that entry's code, or when a second run repeats it.
+  pull request quotes those lines and gives each entry there a sentence. Main against itself was called on none to two
+  of a run's 192 entries, 204 since 2026-10-12, so a call counts when the change runs that entry's code, or when a
+  second run repeats it.
 - **A background window times as a foreground one**: the harness's Chrome starts with its three switches against
   throttling, webkit-host's window reports itself visible whatever covers it, and the page yields with a
   `MessageChannel` message, never a timer or an animation frame. The exception is a Firefox window covered whole, whose
@@ -326,7 +333,7 @@ claims rest on these ratios; nothing timed is checked in.
 The rows follow what an app does: `new` (text no library or browser has laid out, and UI labels), `fresh` (a fresh page
 a library: compiling and running the bundle and its first batches, as medians with no verdict), `rich` (rich inline, on
 stress items and on the chat demo's paragraphs), `seen` (text prepared before), `resize` (`layout()` on kept handles),
-`lines` (the line functions, on messages the simple stepper lays out) and `worst` (nine worst-case shapes, five of
+`lines` (the line functions, on messages the simple stepper lays out) and `worst` (eleven worst-case shapes, five of
 which reach the full walker). Never rank `prepare()` against `layout()`, as one is paid once and the other on every
 resize.
 
@@ -345,14 +352,16 @@ how each form's floors were fitted, the entries known to misread, and what a run
 ## Browsers and pins
 
 Builds are read from the app bundles, since a user agent names only the major version. Each Firefox copy gets its update
-policy before its first launch, since a pinned Firefox once updated itself (`browsers.ts` has how). A Chrome copy has
-no such guard: Google's updater updated the pinned copy of 154.0.8037.57 in place to 154.0.8037.98 (2026-10-06), after
+policy before its first launch, since a pinned Firefox once updated itself (`browsers.ts` has how). A Chrome copy has no
+such guard: Google's updater updated the pinned copy of 154.0.8037.57 in place to 154.0.8037.98 (2026-10-06), after
 which `record`, `check` and `gate` refuse until a repin. That build recorded all 43,203 cases as 154.0.8037.57 had,
-lines, widths and height, and holds the same break data. Safari can't be
-pinned, and a macOS update moves all three browsers (system fonts, Core Text, ICU, emoji). `repin` records every case
-with the new build into a scratch copy of the recordings and prints the cases laid out otherwise, the new page history,
-and whether the browser still holds the files of `scripts/engine-data/` that its `sources.json` lists: the engines'
-compiled break rules and ICU's character properties, not the two pair tables (DEVELOPMENT.md, Engine Data).
+lines, widths and height, and holds the same break data. The pin went to 155.0.8059.80 on 2026-10-14, after the
+installed Chrome updated itself twice: 155.0.8059.40 (2026-10-13) and 155.0.8059.80 each recorded all 43,795 cases as
+154.0.8037.98 had, lines, widths and height, and hold the same break data. Safari can't be pinned, and a macOS update
+moves all three browsers (system fonts, Core Text, ICU, emoji). `repin` records every case with the new build into a
+scratch copy of the recordings and prints the cases laid out otherwise, the new page history, and whether the browser
+still holds the files of `scripts/engine-data/` that its `sources.json` lists: the engines' compiled break rules and
+ICU's character properties, not the two pair tables (DEVELOPMENT.md, Engine Data).
 
 Firefox's pin went from 156.0.1 to 157.0.1 on 2026-10-10, four days after the installed Firefox updated itself. The two
 builds recorded all 44,881 cases alike that day, lines, widths and height, and 157.0.1 holds the same break data.
@@ -460,11 +469,17 @@ rounds (`types.ts`, `wholePixelBoxes`). The width report leaves those lines out 
 the lines of webkit-host's passing sample draws inside the claims were more than 0.05 px off, without them 0.8%
 (2026-10-01). The shrink-wrap check keeps them, so there it misses a box up to a pixel too narrow where such a line is
 the widest, as in a fifth of the sample's pre-wrap draws, and webkit-host's `narrow` column reads low on pre-wrap text.
+The table's `off` column counts no rich draw, and it leaves a line that ends in a space with a box out in every browser
+(`score.ts`, `widthsOff`): a third of the lines of the sample's plain pre-wrap draws (2026-10-12), which it reads by
+their other lines. It counts the draws that vary between runs (`varying/`) as the table's other columns do, so its row
+for `system-ui` font lists reads 77 or 78 in webkit-host from one run to the next (2026-10-12).
 The harness doesn't see re-layout at a line's own width; several rules of the Gecko profile's analysis of bidi
 controls (`ENGINE_FOLLOWUPS.md`, Harness debt); an emoji modifier split from its
 base across rich items; a rich paragraph of one item, which the adapter writes as plain text, so `src/layout.test.ts`
 checks its line functions against the same item with an empty item after it, the form of the rich set's one such
-paragraph (`under-1px/one-item`); a line that holds only an atomic item of white space, or in Firefox a padded item of
+paragraph (`under-1px/one-item`); text nodes of one style, which the adapter writes as one text, where Firefox's lines
+turn on the node a zero-width space is in after preserved spaces that hang (`ENGINE_FOLLOWUPS.md`, Line edges); a line
+that holds only an atomic item of white space, or in Firefox a padded item of
 only a soft hyphen, which has no text for the recorder to list, so a prediction with that line is scored as a line too
 many though the recorded height has it; Chrome's UI language, and so its `zh` table for pages without a
 `lang`; rendering other than macOS's and an iOS simulator's (Other ratios and phones), though Android and Windows are

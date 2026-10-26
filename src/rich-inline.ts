@@ -3,6 +3,7 @@ import {
   alignToSource,
   analyzeText,
   isCollapsibleSpaceCode,
+  DROPPED,
   HARD_BREAK,
   KIND_BITS,
   OBJECT,
@@ -19,7 +20,6 @@ import {
   type ParagraphItems,
   type WhiteSpaceMode,
 } from './analysis.js'
-import { getSegmentEntryWidth, type SegmentEntryGeometry } from './entry-geometry.js'
 import { buildLineTextFromRange, buildRangeText, getGraphemeEnds, type PreparedSegments } from './line-text.js'
 import {
   getItemTabAdvance,
@@ -167,7 +167,8 @@ type InternalPreparedRichInline = PreparedRichInline & {
   // Per segment, where its text starts and ends in its item's text, and, for a segment whose text
   // isn't one stretch of its item's, as where white space inside it was removed, where each of
   // its units is there, else null (null too where no segment has any). A paragraph that is one
-  // text's handle finds them when a line is first materialized, from `text`, its item's.
+  // text's handle finds them when a line is first materialized, from `text`, its item's; a
+  // frozen one keeps them beside the handle, and these stay null (textSources).
   sourceStarts: number[] | null
   sourceEnds: number[] | null
   sourceUnits: (number[] | null)[] | null
@@ -305,8 +306,6 @@ export function prepareRichInline(items: Array<RichInlineItem | RichInlineBox>, 
   // Firefox 156 and Safari 27 prepare CJK styled paragraphs again up to 8% faster with the lists
   // made whole than with each filled by a call and a push a segment (RESEARCH.md, Keeping Work
   // Bounded, JavaScript Engines, under A paragraph's sparse lists made whole).
-  let entryGeometry: (SegmentEntryGeometry | null)[] | null = null
-  let lineStartProhibitions: (Uint8Array | null)[] | null = null
   let breakableLineStartExtras: (number[] | null)[] | null = null
   let lineStartExtras: number[] | null = null
   let lineEndTrims: number[] | null = null
@@ -550,13 +549,6 @@ export function prepareRichInline(items: Array<RichInlineItem | RichInlineBox>, 
       }
       const units = getSourceUnits(offsets, normalizedStart, textEnd, starts[index]!)
       if (units !== null) (sourceUnits ??= new Array<number[] | null>(flags.length).fill(null))[at] = units
-      if (sub.entryGeometry !== null && sub.entryGeometry[s] !== null) {
-        const geometry = sub.entryGeometry[s]!
-        // Entries start inside the segment, so they have already passed its start width.
-        // Their last prefix and whole-tail fit still pay its end width. Copy the cached facts.
-        ;(entryGeometry ??= new Array<SegmentEntryGeometry | null>(flags.length).fill(null))[at] = holdsEnd ? addEndWidth(geometry, endWidth) : geometry
-      }
-      if (sub.lineStartProhibitions !== null && sub.lineStartProhibitions[s] !== null) (lineStartProhibitions ??= new Array<Uint8Array | null>(flags.length).fill(null))[at] = sub.lineStartProhibitions[s]!
       if (sub.breakableLineStartExtras !== null && sub.breakableLineStartExtras[s] !== null) (breakableLineStartExtras ??= new Array<number[] | null>(flags.length).fill(null))[at] = sub.breakableLineStartExtras[s]!
       const startExtra = (sub.lineStartExtras === null ? 0 : sub.lineStartExtras[s]!) + (i > first ? extraWidth : 0)
       if (startExtra !== 0) (lineStartExtras ??= zeroList(flags.length))[at] = startExtra
@@ -645,7 +637,7 @@ export function prepareRichInline(items: Array<RichInlineItem | RichInlineBox>, 
     itemEndHalts,
     hyphenRooms: discretionaryHyphenContexts !== null && profile.unfitHyphenRetreat === 'reduced-width' ? getHyphenRooms(hyphenWidths, itemSegments, segmentItems) : null,
     insideExtras, fillExtras, openingEdges,
-    emptyObjectSpaces: null, emptyObjectReturns: null,
+    emptyObjectSpaces: null, emptyObjectReturns: null, hangEnds: null,
   }
   // The properties measureAnalysis() gives a text's handle, in its order, then the paragraph's own.
   const data = {
@@ -654,11 +646,9 @@ export function prepareRichInline(items: Array<RichInlineItem | RichInlineBox>, 
     simpleLineWalkFastPath: simple,
     simpleLineCountFastPath: false,
     breakableFitAdvances,
-    entryGeometry,
     letterSpacing: spacingsDiffer || sharedSpacing === null ? 0 : sharedSpacing,
     discretionaryHyphenWidth: firstTextItem < 0 ? 0 : hyphenWidths[firstTextItem]!,
     discretionaryHyphenContexts,
-    lineStartProhibitions,
     breakableLineStartExtras,
     lineStartExtras,
     lineEndTrims,
@@ -669,6 +659,15 @@ export function prepareRichInline(items: Array<RichInlineItem | RichInlineBox>, 
   } satisfies PreparedLineData as PreparedSegments
   data.segments = segments
   if (hasEmptyObject && profile.emptyAtomicAlwaysFits) setEmptyObjectFacts(segmentData, data, items, itemSegments, segmentItems, source, starts)
+  // Each item is a text frame: a zero-width space after preserved spaces of its own item ends
+  // the run of them that hangs (ParagraphSegmentData, hangEnds).
+  if (preserve && profile.hangsSpacesPerTextFrame && source.includes('\u200B')) {
+    for (let i = 1; i < segmentCount; i++) {
+      if ((segmentFlags[i]! & (KIND_BITS | DROPPED)) === ZERO_WIDTH_BREAK && (segmentFlags[i - 1]! & KIND_BITS) === PRESERVED_SPACE && segmentItems[i] === segmentItems[i - 1]) {
+        ;(segmentData.hangEnds ??= new Uint8Array(segmentCount))[i] = 1
+      }
+    }
+  }
 
   let onlyItem = -1
   for (let index = 0; index < items.length && !paddedOrObject; index++) {
@@ -913,38 +912,18 @@ function getOpeningFit(flags: number[], from: number, to: number, extraWidth: nu
   return extraWidth
 }
 
-// A one-time end width belongs to the last grapheme even when an entry reshapes the tail.
-function addEndWidth(geometry: SegmentEntryGeometry, width: number): SegmentEntryGeometry {
-  const terminalPrefixes = geometry.terminalPrefixes.slice()
-  const end = terminalPrefixes.length - 1
-  terminalPrefixes[end] = terminalPrefixes[end]! + width
-  const entries = geometry.entries.map((entry, start) => {
-    if (entry === null) return null
-    const head = entry.head.slice()
-    if (start + head.length === end) head[head.length - 1] = head[head.length - 1]! + width
-    return { head, admissionFit: entry.admissionFit + width }
-  })
-  return { terminalPrefixes, entries }
-}
-
 // The width on a line of graphemes [from, to) of segment i, to its end where `to` is -1: a line
 // starts or ends inside its first and its last segment only. Where they start the line
 // (`startsLine`), the first of them adds what a line that starts with it does
 // (breakableLineStartExtras), as the walker's line does.
 function getPartWidth(data: PreparedSegments, i: number, from: number, to: number, startsLine: boolean): number {
-  const { breakableFitAdvances, breakableLineStartExtras, entryGeometry, letterSpacing, items } = data
+  const { breakableFitAdvances, breakableLineStartExtras, letterSpacing, items } = data
   const advances = breakableFitAdvances[i]!
   if (to < 0) to = advances.length
-  const entry = from > 0 && entryGeometry !== null ? entryGeometry[i]! : null
-  const entryWidth = entry === null ? null : getSegmentEntryWidth(entry, from, to)
   let w = 0
-  if (entryWidth !== null) {
-    w = entryWidth
-  } else {
-    for (let g = from; g < to; g++) w += advances[g]! + letterSpacing
-    const startExtras = startsLine && breakableLineStartExtras !== null ? breakableLineStartExtras[i]! : null
-    if (startExtras !== null) w += startExtras[from]!
-  }
+  for (let g = from; g < to; g++) w += advances[g]! + letterSpacing
+  const startExtras = startsLine && breakableLineStartExtras !== null ? breakableLineStartExtras[i]! : null
+  if (startExtras !== null) w += startExtras[from]!
   if (items !== undefined && (from > 0 ? items.insideExtras !== null : items.fillExtras !== null)) w += from > 0 ? items.insideExtras![i]! : items.fillExtras![i]!
   return w
 }
@@ -1180,9 +1159,26 @@ function getSourceUnits(offsets: Int32Array, from: number, to: number, itemStart
   return units
 }
 
+// Per frozen handle of a paragraph that is one text's handle, the three lists of where its
+// segments are in the item's text (InternalPreparedRichInline), found when a line of it is
+// first materialized. A handle keeps them itself; a frozen one can't take them, so they are
+// kept beside it, as its segments' grapheme ends are (getGraphemeEnds): no line function writes
+// to a frozen handle or to anything it holds, so one the app froze, or a copy of one in a store
+// that freezes its state, materializes as any other. Kept beside every handle, the lookup took
+// a pass that walks and materializes 3,000 of the chat demo's one-item paragraphs, each asked
+// once, 35-47% longer with the handles out of the processor's caches and 7-25% with them in,
+// and 40 of them over and over 1-9% (JavaScriptCore of bun 1.4.2, V8 15.4 and node 23.10's,
+// SpiderMonkey 156, one build a process on the harness's stand-in Canvas, 2026-10-12). Found
+// while preparing, the lists took such paragraphs 6-13% longer to prepare and count once in
+// JavaScriptCore and 12-20% in V8, text seen before, and a third more heap a handle, for lines
+// a long list mostly never paints; found again at every line, walking and materializing took
+// 5-9 times as long, and over 100 times in a paragraph of 6,000 units.
+type TextSources = { sourceStarts: number[]; sourceEnds: number[]; sourceUnits: (number[] | null)[] }
+const textSources = new WeakMap<InternalPreparedRichInline, TextSources>()
+
 // Per segment of a paragraph that is one text's handle, where its text starts and ends in the
 // item's.
-function findSegmentSources(flow: InternalPreparedRichInline): void {
+function findSegmentSources(flow: InternalPreparedRichInline): TextSources {
   const { segments } = flow.data
   const offsets = alignToSource(flow.text, segments.join(''), getEngineProfile().lineBreakScan)
   const sourceStarts: number[] = []
@@ -1194,15 +1190,21 @@ function findSegmentSources(flow: InternalPreparedRichInline): void {
     sourceEnds.push(flow.text.charCodeAt(end - 1) === 0x0D && flow.text.charCodeAt(end) === 0x0A && segments[i] === '\n' ? end + 1 : end)
     sourceUnits.push(getSourceUnits(offsets, at, at + segments[i]!.length, 0))
   }
-  flow.sourceStarts = sourceStarts
-  flow.sourceEnds = sourceEnds
-  flow.sourceUnits = sourceUnits
+  const sources = { sourceStarts, sourceEnds, sourceUnits }
+  if (Object.isFrozen(flow)) {
+    textSources.set(flow, sources)
+  } else {
+    flow.sourceStarts = sourceStarts
+    flow.sourceEnds = sourceEnds
+    flow.sourceUnits = sourceUnits
+  }
+  return sources
 }
 
 // Where unit `unit` of a segment's text is in its item's text.
-function getSourceOffset(flow: InternalPreparedRichInline, segmentIndex: number, unit: number): number {
-  const units = flow.sourceUnits === null ? null : flow.sourceUnits[segmentIndex]!
-  return units === null ? flow.sourceStarts![segmentIndex]! + unit : units[unit]!
+function getSourceOffset(sourceStarts: number[], sourceUnits: (number[] | null)[] | null, segmentIndex: number, unit: number): number {
+  const units = sourceUnits === null ? null : sourceUnits[segmentIndex]!
+  return units === null ? sourceStarts[segmentIndex]! + unit : units[unit]!
 }
 
 // Bridge from cheap range walking to full fragment text. Lets callers do
@@ -1214,9 +1216,8 @@ export function materializeRichInlineLineRange(
 ): RichInlineLine {
   const flow = getInternalPreparedRichInline(prepared)
   const { data, itemSegments } = flow
-  if (flow.sourceStarts === null) findSegmentSources(flow)
-  const sourceStarts = flow.sourceStarts!
-  const sourceEnds = flow.sourceEnds!
+  let { sourceStarts, sourceEnds, sourceUnits } = flow
+  if (sourceStarts === null) ({ sourceStarts, sourceEnds, sourceUnits } = textSources.get(flow) ?? findSegmentSources(flow))
   const lineEndSegmentIndex = getSegmentIndex(flow, line.end)
   const fragments: InternalRichInlineFragment[] = []
 
@@ -1232,11 +1233,11 @@ export function materializeRichInlineLineRange(
     const endGraphemeIndex = endSegmentIndex < itemEnd ? fragment.end.graphemeIndex : 0
     // Only the fragment a line ends with shows the hyphen of a soft hyphen it ends at.
     const endsLine = i === line.fragments.length - 1 && endSegmentIndex === lineEndSegmentIndex && endGraphemeIndex === line.end.graphemeIndex
-    let sourceStart = startSegmentIndex < itemEnd ? sourceStarts[startSegmentIndex]! : startSegmentIndex > first ? sourceEnds[startSegmentIndex - 1]! : 0
-    if (startGraphemeIndex > 0 && startSegmentIndex < itemEnd) sourceStart = getSourceOffset(flow, startSegmentIndex, getGraphemeEnds(data, startSegmentIndex)[startGraphemeIndex - 1]!)
+    let sourceStart = startSegmentIndex < itemEnd ? sourceStarts[startSegmentIndex]! : startSegmentIndex > first ? sourceEnds![startSegmentIndex - 1]! : 0
+    if (startGraphemeIndex > 0 && startSegmentIndex < itemEnd) sourceStart = getSourceOffset(sourceStarts, sourceUnits, startSegmentIndex, getGraphemeEnds(data, startSegmentIndex)[startGraphemeIndex - 1]!)
     let sourceEnd = sourceStart
-    if (endGraphemeIndex > 0) sourceEnd = getSourceOffset(flow, endSegmentIndex, getGraphemeEnds(data, endSegmentIndex)[endGraphemeIndex - 1]! - 1) + 1
-    else if (endSegmentIndex > startSegmentIndex) sourceEnd = sourceEnds[endSegmentIndex - 1]!
+    if (endGraphemeIndex > 0) sourceEnd = getSourceOffset(sourceStarts, sourceUnits, endSegmentIndex, getGraphemeEnds(data, endSegmentIndex)[endGraphemeIndex - 1]! - 1) + 1
+    else if (endSegmentIndex > startSegmentIndex) sourceEnd = sourceEnds![endSegmentIndex - 1]!
     fragments.push({
       itemIndex: fragment.itemIndex,
       text: endsLine ? buildLineTextFromRange(data, startSegmentIndex, startGraphemeIndex, endSegmentIndex, endGraphemeIndex)

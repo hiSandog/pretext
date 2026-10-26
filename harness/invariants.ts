@@ -4,18 +4,20 @@
 //   bun harness/invariants.ts --profile=blink|webkit|gecko|unknown [--lib=<src dir>] [--draws=500|all] [--rich=100|all]
 //
 // Each process gives the library a stand-in Canvas: at 16 px a character is 8 px, a space 4, a mark or a format character
-// 0, plus the letter spacing per grapheme. U+2028 measures as the space, whose glyph Chrome draws it with, and sits 0,
+// 0, plus the letter spacing per grapheme, or in the WebKit process per character that has an advance, as Safari's
+// Canvas adds it per glyph, so a grapheme of several such characters takes several (getExtraSpacings in
+// src/measurement.ts). U+2028 measures as the space, whose glyph Chrome draws it with, and sits 0,
 // 0.5 or 1 px closer to the character on either side of it unless the context's `fontKerning` is 'none', so the
 // Chromium profile finds every font kerning the space and takes its kerning with spaces (getFontSpaceKerning and
 // getSpaceKerning in src/measurement.ts). Two neighbouring characters of 8 px each, so neither a space, U+2028, a mark
 // nor a format character, sit 0 to 0.6 px closer: for six of every seven pairs that is kerning, and for the seventh a
-// ligature, off under any letter spacing, so a word doesn't measure as its letters do alone and the fits of a word cut
-// between letters take the paths they take in a font (getSegmentFit). Nothing in src/ measures two such neighbours
-// under `fontKerning` 'none', so that kerning doesn't read it. A context under text-rendering: optimizeLegibility,
-// where Chrome shapes a string whole, sits two kana in a row as much closer again, unless its `fontKerning` is 'none',
-// so the profile finds every font kerning kana too (getFontKanaKerning). The Blink and Gecko processes run under a desktop user
-// agent with a string `letterSpacing` on the context, as Chrome's and Firefox's have, so preparation takes the paths
-// those browsers take.
+// ligature, off under any letter spacing but in the WebKit process, whose Canvas keeps it as Safari's does, so a word
+// doesn't measure as its letters do alone and the fits of a word cut between letters take the paths they take in a font
+// (getSegmentFit). Nothing in src/ measures two such neighbours under `fontKerning` 'none', so that kerning doesn't
+// read it. A context under text-rendering: optimizeLegibility, where Chrome shapes a string whole, sits two kana in a
+// row as much closer again, unless its `fontKerning` is 'none', so the profile finds every font kerning kana too
+// (getFontKanaKerning). The Blink, WebKit and Gecko processes' contexts have a string `letterSpacing`, as the three
+// browsers' have, so preparation takes the paths those browsers take.
 // The inputs are seeded draws from harness/cases (a failure names its case, at its width, half and 1.5 times it, 1 and
 // Infinity) and a few fixed ones; `bun harness gate` runs its browser's profile over every case (`all`), 20-25 s of
 // processor time a profile at a load average of 30-60: in 500 draws, five WebKit-profile cases that failed the coverage
@@ -24,8 +26,8 @@
 // - every line API agrees with walkLineRanges (predict.ts's check), and layoutWithLines and layoutNextLine give equal
 //   line objects, so a field one of them forgets shows;
 // - lines cover the source forward without overlap, at a fixed width and at one that changes per line, and between lines
-//   leave only collapsed spaces, a soft hyphen or ZWSP that doesn't break, a pre-wrap line feed, in Safari a U+2028 or
-//   U+2029, or in Firefox a bidi control;
+//   leave only collapsed spaces, a soft hyphen, a pre-wrap line feed, in Safari a U+2028 or U+2029, or in Firefox a
+//   bidi control, and never a ZWSP, which is content of no width on the line it is on;
 // - stepping leaves its start cursor as it was, the ranges a stream gives stay as they were, JSON copies of cursors and
 //   ranges resume the same, and a text's materialized line passed back as a range gives the same line (a rich one's
 //   type is no range's, its fragments having no cursors: an app passes its range back);
@@ -56,8 +58,8 @@ import { canvasFont, cursorOffsets, fragmentProblem, plainDisagreement, prepareO
 import { createRng } from './sets/build.ts'
 import { isRich, type Case } from './types.ts'
 
-// Of a user agent the library reads the engine and whether it is a desktop browser's, never the browser's version
-// (getLayoutEngine() and buildEngineProfile() in src/measurement.ts), so these don't follow harness/pins.json.
+// Of a user agent the library reads the engine alone, never the browser's version (getLayoutEngine() in
+// src/measurement.ts), so these don't follow harness/pins.json.
 export const PROFILES = {
   blink: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36',
   webkit: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.0 Safari/605.1.15',
@@ -69,19 +71,21 @@ type Api = typeof import('../src/layout.ts') & typeof import('../src/rich-inline
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
 
-export function standInWidth(text: string, font: string, letterSpacing: number, fontKerning: string, textRendering: string): number {
+export function standInWidth(text: string, font: string, letterSpacing: number, fontKerning: string, textRendering: string, spacesGlyphs = false): number {
   const size = Number(/(\d+(?:\.\d+)?)px/.exec(font)?.[1] ?? 16) / 16
   let width = 0
   let previous = -1
   let previousAdvance = 0
+  let glyphs = 0
   for (const ch of text) {
     const code = ch.codePointAt(0)!
     const advance = /[\p{M}\p{Cf}]/u.test(ch) ? 0 : code === 0x20 || code === 0x2028 ? 4 : 8
     width += advance
+    if (advance !== 0) glyphs++
     if (fontKerning !== 'none' && previous >= 0 && (code === 0x2028) !== (previous === 0x2028)) width -= (code === 0x2028 ? previous : code) % 3 / 2
     if (advance === 8 && previousAdvance === 8) {
       const together = (previous * 31 + code) % 7
-      if (together !== 6 || letterSpacing === 0) width -= together / 10
+      if (together !== 6 || letterSpacing === 0 || spacesGlyphs) width -= together / 10
     }
     if (fontKerning !== 'none' && textRendering === 'optimizeLegibility' && previous >= 0x3041 && previous <= 0x30ff && code >= 0x3041 && code <= 0x30ff) width -= (previous + code) % 3 / 2
     previous = code
@@ -90,14 +94,15 @@ export function standInWidth(text: string, font: string, letterSpacing: number, 
   let count = 0
   // A spacing under Blink's unit, 1/65536 px, adds nothing in Chrome or Firefox, whose unit is 1/60 px: the library
   // measures letter-spaced text under such a spacing (LETTER_SPACED_SHAPING in src/measurement.ts).
-  if (Math.abs(letterSpacing) >= 1 / 65536) for (const _ of graphemes.segment(text)) count++
+  if (spacesGlyphs) count = letterSpacing === 0 ? 0 : glyphs
+  else if (Math.abs(letterSpacing) >= 1 / 65536) for (const _ of graphemes.segment(text)) count++
   return width * size + count * letterSpacing
 }
 
 // measureText calls and the UTF-16 units submitted to them.
 const measured = { calls: 0, units: 0 }
 function installStandIn(profile: Profile): void {
-  const spaced = profile === 'blink' || profile === 'gecko'
+  const spaced = profile !== 'unknown'
   const context = (): { font: string; fontKerning: string; textRendering: string; letterSpacing?: string; measureText: (text: string) => { width: number } } => {
     const ctx = {
       font: '10px sans-serif',
@@ -106,7 +111,7 @@ function installStandIn(profile: Profile): void {
       measureText(text: string): { width: number } {
         measured.calls++
         measured.units += text.length
-        return { width: standInWidth(text, ctx.font, spaced ? Number.parseFloat(ctx.letterSpacing!) : 0, ctx.fontKerning, ctx.textRendering) }
+        return { width: standInWidth(text, ctx.font, spaced ? Number.parseFloat(ctx.letterSpacing!) : 0, ctx.fontKerning, ctx.textRendering, profile === 'webkit') }
       },
       ...(spaced ? { letterSpacing: '0px' } : {}),
     }
@@ -221,11 +226,11 @@ export async function runInvariants(profile: Profile, lib: string, draws: { dir:
   // makes a hard break in normal white space as a line feed is one in pre-wrap.
   const gecko = profile === 'gecko'
   const removed = gecko ? /[\r\f]/g : profile === 'webkit' ? /\r/g : null
-  const unpaintedNormal = gecko ? /^[ \u00AD\u200B\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]*$/ : profile === 'webkit' ? /^[ \u00AD\u200B\u2028\u2029]*$/ : /^[ \u00AD\u200B]*$/
-  const unpaintedPreWrap = gecko ? /^[\n\u00AD\u200B\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]*$/ : /^[\n\u00AD\u200B]*$/
+  const unpaintedNormal = gecko ? /^[ \u00AD\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]*$/ : profile === 'webkit' ? /^[ \u00AD\u2028\u2029]*$/ : /^[ \u00AD]*$/
+  const unpaintedPreWrap = gecko ? /^[\n\u00AD\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]*$/ : /^[\n\u00AD]*$/
   // The same in a rich item's own text, which white space hasn't been normalized in.
-  const unpaintedSourceNormal = gecko ? /^[ \t\n\r\f\u00AD\u200B\u2028\u2029\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]*$/ : /^[ \t\n\r\f\u00AD\u200B\u2028\u2029]*$/
-  const unpaintedSourcePreWrap = gecko ? /^[\n\r\f\u00AD\u200B\u2028\u2029\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]*$/ : /^[\n\r\f\u00AD\u200B\u2028\u2029]*$/
+  const unpaintedSourceNormal = gecko ? /^[ \t\n\r\f\u00AD\u2028\u2029\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]*$/ : /^[ \t\n\r\f\u00AD\u2028\u2029]*$/
+  const unpaintedSourcePreWrap = gecko ? /^[\n\r\f\u00AD\u2028\u2029\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]*$/ : /^[\n\r\f\u00AD\u2028\u2029]*$/
   const covers = (stream: string, spans: ReadonlyArray<[number, number]>, whiteSpace: 'normal' | 'pre-wrap', from = 0, source = false): string | null => {
     const unpainted = source ? (whiteSpace === 'normal' ? unpaintedSourceNormal : unpaintedSourcePreWrap) : whiteSpace === 'normal' ? unpaintedNormal : unpaintedPreWrap
     let end = from
@@ -492,7 +497,7 @@ export async function runInvariants(profile: Profile, lib: string, draws: { dir:
     }
   }
   const FONT = '16px Test'
-  // A mark after a word joiner, where Chrome and Firefox measure a fresh line's first graphemes apart (entry geometry).
+  // A mark after a word joiner, in a word that a narrow line cuts, under a negative letter spacing.
   plainInput('fixed a WJ U+0301 bc', 'a\u2060\u0301bc ', FONT, { letterSpacing: -1 }, widthsOf(27, false), 20)
   plainInput('fixed a WJ U+0301 bc x16', 'a\u2060\u0301bc '.repeat(16), FONT, { letterSpacing: -1 }, widthsOf(27, false), 20)
   // A SPACE is 4px here: the gap's sign changes at letter spacing -4.

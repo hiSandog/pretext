@@ -1,7 +1,6 @@
 import { findGraphemeEnds, type GraphemeTable } from './graphemes.js'
-import { canWebKitLineStartWith, DEFAULT_IGNORABLE, getBlinkDefaultLocale, hasProperty, MARK } from './line-breaks.js'
+import { DEFAULT_IGNORABLE, getBlinkDefaultLocale, hasProperty, MARK } from './line-breaks.js'
 import { webkitGenericFamilies, webkitGenericFamilyNames, webkitScriptLanguages, webkitScriptSubtags } from './generated/webkit-generic-families.js'
-import type { SegmentEntryGeometry } from './entry-geometry.js'
 import type { HanKerningFontData } from './han-kerning.js'
 
 // What preparation knows of a segment in a font. Each is created with all its fields,
@@ -11,6 +10,9 @@ export type SegmentMetrics = {
   emojiCount: number // Glyphs the emoji font draws (countEmojiGlyphs), or -1 until counted
   fit: SegmentFit | null // Where it breaks under overflow, for the last fit mode asked
   spaceKerning: SpaceKerning | null // Its kerning beside a space, once asked (getSpaceKerning)
+  // Per grapheme, the letter spacings it takes more than one, once letter-spaced text asked
+  // where the engine spaces glyphs (getExtraSpacings): empty where every grapheme takes one.
+  extraSpacings: number[] | null
 }
 
 // A text segment's kerning with a U+0020 beside it, in the Chromium profile (getSpaceKerning).
@@ -27,23 +29,9 @@ export type SegmentFit = {
   // With advances, per grapheme, what a line that starts with it adds to its advance, where
   // the engine shapes such a line again (the 'reshaped-lines' mode). Null where nothing.
   lineStartExtras: number[] | null
-  // With advances in the WebKit profile, per grapheme, 1 for one after the first that
-  // WebKit doesn't start a line with when a line holds only an overflowing first
-  // character, by its first code unit. Null without any.
-  lineStartProhibitions: Uint8Array | null
-  entryGeometry: {
-    letterSpacing: number
-    emojiCorrection: number
-    geometry: SegmentEntryGeometry | null
-  } | null
 }
 
 export type EngineProfile = {
-  // How a line that starts inside a segment holding a default-ignorable code point
-  // admits the segment's tail (src/entry-geometry.ts): by the tail's own measured start
-  // ('fresh', desktop Blink), by the whole segment's width minus the consumed prefixes
-  // ('original', desktop Gecko), or not at all ('disabled').
-  entryFitBasis: 'fresh' | 'original' | 'disabled'
   // Where preparation finds break opportunities: each engine's own scan. Blink and WebKit
   // scan the text with their pair tables and ICU line rules (src/line-breaks.ts), Gecko
   // with nsLineBreaker over ICU4X's rules (src/gecko-line-breaks.ts), and engines Pretext
@@ -100,8 +88,9 @@ export type EngineProfile = {
   // (ENGINE_FOLLOWUPS.md, Emergency breaks inside a word).
   cutWordKeepsLigatures: boolean
   // WebKit measures a text item together with a directly following U+0020 and
-  // subtracts one unshaped space, so the item keeps its kerning with that space
-  // wherever the line ends. Gecko shapes words without their spaces.
+  // subtracts one space measured alone, so the item keeps its kerning with that
+  // space wherever the line ends, under letter spacing too (getFollowingSpaceTail
+  // in src/prepare.ts). Gecko shapes words without their spaces.
   measureTextWithFollowingSpace: boolean
   // Blink's layout shapes each run of one script and direction in one call, its spaces
   // included (HarfBuzzShaper::Shape, harfbuzz_shaper.cc:1063-1104), so in a font whose kerning
@@ -136,11 +125,23 @@ export type EngineProfile = {
   // ('cluster'); in WebKit none, which spaces every glyph that has an advance
   // (ComplexTextController.cpp:793-796, WidthIterator.cpp:511-516).
   unspacedCursive: 'run' | 'cluster' | 'none'
-  // Blink's page shapes a soft hyphen inside its text, so nonspacing marks after
-  // one shape with the text before it and take no advance. Its Canvas turns the soft
-  // hyphen into a ZWSP and shapes each word alone, where such a mark can take a
-  // dotted circle. WebKit's page gives the marks the advance its Canvas measures.
-  shapesMarksAcrossSoftHyphen: boolean
+  // WebKit's complex text path gives every glyph that has an advance one letter spacing
+  // (ComplexTextController.cpp:793-796), not every grapheme: a Devanagari consonant takes
+  // two with the sign of aa, i, ii, o or au, which is a glyph of its own beside it, and
+  // one more for each half form before it, and lam and alef, drawn as one glyph, take one.
+  // In 16px Kohinoor Devanagari at 1px Safari 27 spaces the two graphemes of
+  // `\u0939\u093F\u0928\u094D\u0926\u0940` four times and in Devanagari MT five. Its Canvas spaces
+  // text by the same code (setLetterSpacing puts the spacing on the font measureText
+  // measures with, CanvasRenderingContext2DBase.cpp:3271-3296, 519-522), so the WebKit
+  // profile asks it how many spacings each grapheme of such text takes (getExtraSpacings):
+  // the page's count wherever the text has none of the optional ligatures the page turns
+  // off and Canvas keeps (canvasLetterSpacingDropsLigatures), which Canvas counts as one
+  // glyph. The simple path spaces every character that has an advance
+  // (WidthIterator.cpp:511-516), and its text keeps one spacing a grapheme: Canvas would
+  // count its `fi` as one glyph, and a character with no advance there, as a word joiner,
+  // keeps a spacing the page doesn't give it (ENGINE_FOLLOWUPS.md, Letter spacing). Blink
+  // and Gecko space clusters.
+  letterSpacesGlyphs: boolean
   // When a selected discretionary hyphen does not fit, Blink retries the text
   // item against the width minus the hyphen (BreakText, line_breaker.cc:1705-1718,
   // Chromium 153), so the line ends at the latest earlier opportunity that leaves
@@ -168,6 +169,24 @@ export type EngineProfile = {
   // prepare.ts). In 16px Arial at 76-80px Safari 27 lays out
   // `the interna\u00ADtion\u00ADal` as `the` / `interna-` / `tional`, and at 40px
   // `trans\u00ADi\u00ADt\u00ADlantic` starts with `trans-`, 40.9px wide.
+  // Each engine tests the hyphen against the line as it shapes it, which the
+  // segments, measured apart, are wider than where letters kern or join across a
+  // soft hyphen. Blink reads the line's width from the item shaped whole, soft
+  // hyphens and all, and shapes the line's end again where the break isn't safe,
+  // as between two kerned letters (the width BreakText tests, line_breaker.cc:
+  // 1684-1703; ShapingLineBreaker::ShapeLine, shaping_line_breaker.cc:511-559): the
+  // pairs across the soft hyphens a line passes narrow it, and the pair across the
+  // one it ends at doesn't. Gecko drops soft hyphens from its text run
+  // (IsDiscardable, nsTextFrameUtils.cpp:32-49), shapes a word once, whole
+  // (SetLineBreaks, gfxTextRun.cpp:1292-1301), and adds up the advances before the
+  // break (BreakAndMeasureText, gfxTextRun.cpp:1085-1097, 1139-1151), so there the
+  // line's last letter keeps what the pair across its end put on its advance.
+  // Premise: all of what the two sides measure narrower joined, as a GPOS pair's
+  // kerning is. Its gap is a pair from a `kern` table, of which HarfBuzz leaves half
+  // on the first letter (hb-kern.hh:102-106), and a ligature across the soft
+  // hyphen, whose letters share its advance (ComputeLigatureData, gfxTextRun.cpp:
+  // 238-322): there the profile keeps a hyphen that overflows by more than Firefox
+  // lets it (ENGINE_FOLLOWUPS.md, Line edges).
   unfitHyphenRetreat: 'reduced-width' | 'full-width' | 'full-width-or-first'
   // A chosen soft hyphen paints U+2010 where a font has a glyph for it, else `-`.
   // WebKit and Blink ask the primary font alone (hyphenString,
@@ -214,12 +233,6 @@ export type EngineProfile = {
   // its own. Gecko drops soft hyphens from its text run and clusters a ZWSP with the marks
   // after it, so glue at a line start can't hold the line: the segment after it starts it.
   zeroWidthGlueTakesLine: boolean
-  // When not even the first character of an overflowing word fits an empty line, WebKit
-  // keeps the punctuation, NBSP, U+2010 and U+2013 after that character on the line, in
-  // text holding a code unit above U+00FF (InlineContentBreaker.cpp:124-158, 222-233;
-  // canWebKitLineStartWith in src/line-breaks.ts). Blink and Gecko end the line after the
-  // first grapheme.
-  keepsLineStartPunctuation: boolean
   // Blink's HanKerning under text-spacing-trim: normal halts CJK opening and closing marks
   // next to other punctuation and at line ends (src/han-kerning.ts). WebKit and Gecko
   // don't trim them by default.
@@ -235,7 +248,7 @@ export type EngineProfile = {
   // scan and its context alike (getPreparationLanguage). WebKit and Gecko take process
   // languages a page can't read and keep the page's.
   laysOutUnderDefaultLocale: boolean
-  // WebKit's page resolves serif, sans-serif, cursive, fantasy and monospace to the
+  // On Cocoa, WebKit's page resolves serif, sans-serif, cursive, fantasy and monospace to the
   // family Core Text names for the page language wherever WebKit's script for it
   // isn't Common (FontDescriptionCocoa.cpp:77-118, asked first by CSSFontSelector.cpp:
   // 334-353). Its Canvas fonts carry no language: OffscreenCanvas starts from a bare
@@ -243,6 +256,14 @@ export type EngineProfile = {
   // canvas `lang` (WebKit #285993). The WebKit profile names the page's families in
   // the Canvas font (getWebKitGenericFamilies), from a table rather than a `<canvas>`
   // element, whose contexts force style updates (RESEARCH.md, Decisions Log, 2026-09-24).
+  // Only on Cocoa: WebKit's other ports, such as WebKitGTK and WPE, resolve the keywords
+  // from the settings, as Canvas does (platformResolveGenericFamily returns null under
+  // !PLATFORM(COCOA), FontDescription.cpp:115-120), and a family the system lacks gives no
+  // font, so Core Text's family would be measured in the standard font (FontCascadeFonts.cpp:
+  // 211-218). A user agent can name a Mac anywhere, as Playwright's WebKit does on Linux, so
+  // the port is read from navigator.platform, which WebKit compiles in: `Linux` and the
+  // machine, `Win32`, `Haiku` or nothing off Cocoa (NavigatorBase.cpp:97-116). Its gap: a
+  // page or a tool that overrides navigator.platform.
   namesGenericFamiliesByLanguage: boolean
   // Release Gecko draws C0 and C1 controls, U+2028 and U+2029 with no advance plus letter
   // spacing (gfxFont.cpp:3877-3892), where its Canvas measures VT, FS-US, NEL and U+2029 as a
@@ -307,6 +328,20 @@ export type EngineProfile = {
   // (setEmptyObjectFacts in src/rich-inline.ts). Blink and WebKit fit it as any other atomic
   // inline and move it to the next line.
   emptyAtomicAlwaysFits: boolean
+  // Whether a zero-width space right after an atomic item or a box wider than its line stays on
+  // that line. Every engine lays a zero-width space out as text of no width (walkPreparedComplexLines
+  // in src/line-break.ts has the rule), and Blink and WebKit break after an atomic inline
+  // (CanBreakAfterAtomicInline, line_breaker.cc:1168-1208; isAtSoftWrapOpportunity,
+  // InlineFormattingUtils.cpp:446-450), so there the zero-width space starts the next line. Gecko
+  // records the break after the atomic inline as its line's first (nsLineLayout.cpp:1057-1071),
+  // which rules out the one overflow-wrap gives before a cluster, taken only on a line with no
+  // break yet (gfxTextRun.cpp:1068-1074), and the line breaker starts again after the atomic
+  // frame, so the text after it has no break at its start (analyzeText in src/analysis.ts): the
+  // text frame takes its text up to the break after the zero-width space, and a frame of no
+  // width is placed wherever it falls (CanPlaceFrame, nsLineLayout.cpp:1264-1270). Two images
+  // wider than their box, each before a zero-width space, are four lines in Chrome 155 and
+  // Safari 27 and two in Firefox 157 (#521).
+  zeroWidthSpaceStaysAfterAtomic: boolean
   // Where the preserved spaces that end a pre-wrap line's text and overflow the line still hang
   // once an item that takes no room follows them on the line, an atomic item of width 0 or an
   // item of soft hyphens alone. Gecko takes the hang out of each text frame's own width, the
@@ -365,6 +400,7 @@ type MeasureState = {
   // What letter-spaced text measures in each font where shapesLetterSpaced: the same text
   // shaped without its optional ligatures.
   letterSpacedFonts: Map<string, FontMeasurement>
+  segments: number // The segments the fonts' caches hold between them (MAX_CACHED_SEGMENTS)
 }
 let measureState: MeasureState | null = null
 // What preparation keeps per font. It all goes together, when the caches clear or the
@@ -396,6 +432,7 @@ export type FontMeasurement = {
   spaceWidth: number | null // The space's width, which every text asks for, kept from the first (getSpaceWidth)
   hanKerning: HanKerningFontData | null | undefined // Read for the first text that may kern
   ligaturePairs: Map<string, boolean> // Whether two neighbouring graphemes are a ligature, once asked (isLigature)
+  glyphCounts: Map<string, number> // The glyphs Canvas letter-spaces in a text, once asked (getExtraSpacings)
 }
 let cachedEngineProfile: EngineProfile | null = null
 
@@ -415,6 +452,19 @@ const MAX_PREFIX_FIT_GRAPHEMES = 96
 // measures 54.2031px in Chrome 154 and 54.2px in Firefox 156, their pages' widths with
 // `font-variant-ligatures: none` (2026-09-30).
 const LETTER_SPACED_SHAPING = '0.000001px'
+
+// The most segments the fonts' caches hold between them when a preparation starts
+// (getPreparationLanguage): past it they are all dropped, as clearCache() drops them, before
+// that preparation measures anything. A handle keeps its own widths, so nothing prepared
+// changes; text prepared afterwards is measured again. Prose adds segments ever more slowly,
+// but ids, numbers and URLs never repeat, so without a bound the caches grow for as long as the
+// page lives. The bound is a safety net well above what a page uses, not a tuned size: the
+// 11,290 plain texts of the harness's real-usage sample, 883,084 units, fill in one font 71,294
+// segments in the Chromium profile, 90,023 in Gecko's and 115,367 in WebKit's, 241-363 B each in
+// JavaScriptCore, and a bound under a page's own count has its text measured again and again:
+// at 65,536, preparing those texts a second time asks Canvas 81,286 to 196,534 times, where
+// under no bound it asks nothing (the harness's stand-in Canvas, 2026-10-12).
+const MAX_CACHED_SEGMENTS = 1 << 18
 
 // Graphemes the emoji font may draw a glyph in, which Canvas widths then tell
 // (countEmojiGlyphs): those holding an emoji-presentation character or a pictograph,
@@ -563,6 +613,11 @@ export function setLocaleLanguage(locale: string | undefined): void {
 // else the page's, or null without a document. The Chromium profile lays out a page
 // without one under Blink's default locale (laysOutUnderDefaultLocale).
 export function getPreparationLanguage(profile: EngineProfile): string | null {
+  // A preparation starts with this read, so the fonts' caches are bounded here, between two
+  // preparations (MAX_CACHED_SEGMENTS), and not where a font is looked up: a rich-inline
+  // paragraph looks one up for each of its items, and caches dropped between two of them would
+  // have one paragraph measured partly from the caches and partly anew.
+  if (measureState !== null && measureState.segments > MAX_CACHED_SEGMENTS) clearMeasurementCaches()
   let language = localeLanguage ?? null
   if (localeLanguage === undefined && typeof document !== 'undefined') {
     const lang = (document.documentElement as HTMLElement | null | undefined)?.lang
@@ -595,26 +650,62 @@ export function zeros(count: number): number[] {
   return out
 }
 
-// A text's width as Canvas spaces it under a letter spacing, or null where the context
-// can't take the spacing. Under none, that is the text's width in the font, which the
-// font's segment cache asks once. Under a spacing it is asked each time, borrowing the
-// font's context for the synchronous call, never enters a segment cache, and
-// letterSpacing is restored even when assignment or measurement fails.
-export function measureWithLetterSpacing(text: string, letterSpacing: number, emojiCorrection: number, measurement: FontMeasurement): number | null {
-  if (!measurement.state.takesLetterSpacing) return null
-  if (letterSpacing === 0) return getTextWidth(text, measurement, emojiCorrection)
-  // Counted before the spacing is set: the count measures stretches into the font's segment cache.
-  const corrected = emojiCorrection === 0 ? 0 : countEmojiGlyphs(text, measurement) * emojiCorrection
-  const context = getContext(measurement)
-  const previous = context.letterSpacing
+// The Canvas letterSpacing a text is measured under to count the glyphs it spaces: far
+// wider than any text asked about, so the text's width over it rounds to the count with
+// nothing taken off, and a power of two, which float32 widths add whole. A text 2^19 px
+// wide under no spacing would count a glyph more.
+const GLYPH_COUNT_SPACING = 2 ** 20
+
+// The spacings of a segment whose graphemes each take one, and of any segment where Canvas
+// can't be asked.
+export const noExtraSpacings: number[] = []
+
+// Per grapheme of a text segment, how many letter spacings it takes more than one, where
+// the engine spaces glyphs (EngineProfile's letterSpacesGlyphs). Canvas spaces by the
+// engine's rule, so a prefix of the segment measured under a letter spacing holds that
+// spacing once for each of its glyphs with an advance, and a grapheme takes what its
+// prefix has more than the prefix before it: WebKit fits a cut word by its prefixes too
+// (TextUtil::breakWord). A grapheme can take none, as the alef of lam-alef, or fewer,
+// where it joins the glyphs before it into one. Past MAX_PREFIX_FIT_GRAPHEMES each
+// grapheme is asked alone, which keeps a giant segment linear and misses a glyph two of
+// its graphemes share. A text's count is kept for the font (FontMeasurement's
+// glyphCounts), so words that start alike ask about a prefix once: one more Canvas call
+// for each prefix new to the font, which WebKit shapes each time, since it keeps no width
+// measured under a letter spacing (TextMeasurementCache.h:165-167). Under a context that
+// takes no letterSpacing every grapheme takes one.
+export function getExtraSpacings(seg: string, measurement: FontMeasurement): number[] {
+  if (!measurement.state.takesLetterSpacing) return noExtraSpacings
+  const ends = new Int32Array(seg.length)
+  const count = findGraphemeEnds(getEngineProfile().graphemeTable, seg, 0, seg.length, ends)
+  const prefixes = count <= MAX_PREFIX_FIT_GRAPHEMES
+  const counts = measurement.glyphCounts
+  // The font's context once Canvas is asked, under the counting spacing from then on, so
+  // it changes its spacing once, and not at all for a segment whose prefixes are counted.
+  let context: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null = null
+  let extras = noExtraSpacings
   try {
-    context.letterSpacing = `${letterSpacing}px`
-    if (Number.parseFloat(context.letterSpacing) !== letterSpacing) return null
-    const width = context.measureText(text).width - corrected
-    return Number.isFinite(width) ? width : null
+    let before = 0
+    for (let i = 0, start = 0; i < count; start = ends[i++]!) {
+      const text = seg.slice(prefixes ? 0 : start, ends[i])
+      let glyphs = counts.get(text)
+      if (glyphs === undefined) {
+        if (context === null) {
+          context = getContext(measurement)
+          context.letterSpacing = `${GLYPH_COUNT_SPACING}px`
+        }
+        glyphs = Math.round(context.measureText(text).width / GLYPH_COUNT_SPACING)
+        counts.set(text, glyphs)
+      }
+      const extra = glyphs - (prefixes ? before : 0) - 1
+      before = glyphs
+      if (extra === 0 && extras.length === 0) continue
+      if (extras.length === 0) extras = zeros(count)
+      extras[i] = extra
+    }
   } finally {
-    context.letterSpacing = previous
+    if (context !== null) context.letterSpacing = measurement.letterSpacing
   }
+  return extras
 }
 
 // The lookup internalizes seg, and a string V8 hashes for the first time there gets a one-byte
@@ -634,8 +725,9 @@ export function getFollowingSpaceMetrics(seg: string, measurement: FontMeasureme
 }
 
 function addMetrics(cache: Map<string, SegmentMetrics>, seg: string, text: string, measurement: FontMeasurement): SegmentMetrics {
-  const metrics: SegmentMetrics = { width: getContext(measurement).measureText(text).width, emojiCount: -1, fit: null, spaceKerning: null }
+  const metrics: SegmentMetrics = { width: getContext(measurement).measureText(text).width, emojiCount: -1, fit: null, spaceKerning: null, extraSpacings: null }
   cache.set(seg, metrics)
+  measurement.state.segments++
   if (!measurement.measuredKana && kanaRe.test(seg)) measurement.measuredKana = true
   return metrics
 }
@@ -899,15 +991,14 @@ export function getEngineProfile(): EngineProfile {
 }
 
 function buildEngineProfile(): EngineProfile {
-  const ua = typeof navigator === 'undefined' ? '' : navigator.userAgent
+  // A navigator can lack a userAgent, as React Native's does, where lib.dom's type says it is a
+  // string: such a runtime names no engine, like one with no navigator.
+  const ua = typeof navigator === 'undefined' ? '' : (navigator as { userAgent?: string }).userAgent ?? ''
   // Engines Pretext doesn't recognize take Blink's profile (RESEARCH.md, Decisions Log,
   // 2026-09-26).
   const engine = getLayoutEngine(ua) ?? 'blink'
-  // Fresh-entry observations are verified only for desktop Blink and Gecko.
-  const isDesktop = /Windows NT|Macintosh|X11/.test(ua) && !/Android|Mobile|iPhone|iPad|iPod/.test(ua)
 
   return {
-    entryFitBasis: isDesktop && engine === 'blink' ? 'fresh' : isDesktop && engine === 'gecko' ? 'original' : 'disabled',
     lineBreakScan: engine,
     graphemeTable: engine === 'webkit' ? 'apple/char' : engine === 'gecko' ? 'gecko/char' : 'chromium/char',
     lineFitEpsilon: engine === 'webkit' ? 1 / 64 : 0.005,
@@ -920,7 +1011,7 @@ function buildEngineProfile(): EngineProfile {
     letterSpacingInAppUnits: engine === 'gecko',
     canvasLetterSpacingDropsLigatures: engine !== 'webkit',
     unspacedCursive: engine === 'blink' ? 'run' : engine === 'gecko' ? 'cluster' : 'none',
-    shapesMarksAcrossSoftHyphen: engine === 'blink',
+    letterSpacesGlyphs: engine === 'webkit',
     unfitHyphenRetreat: engine === 'blink' ? 'reduced-width' : engine === 'gecko' ? 'full-width' : 'full-width-or-first',
     hyphenFromPrimaryFont: engine !== 'gecko',
     letterSpaceTabStops: engine !== 'webkit',
@@ -929,15 +1020,15 @@ function buildEngineProfile(): EngineProfile {
     tabsInAppUnits: engine === 'gecko',
     hangTabs: engine !== 'gecko',
     zeroWidthGlueTakesLine: engine !== 'gecko',
-    keepsLineStartPunctuation: engine === 'webkit',
     hidesControlCharacters: engine === 'gecko',
     hanKerning: engine === 'blink',
     hangsIdeographicSpace: engine !== 'webkit',
     laysOutUnderDefaultLocale: engine === 'blink',
-    namesGenericFamiliesByLanguage: engine === 'webkit',
+    namesGenericFamiliesByLanguage: engine === 'webkit' && !/^(?:Linux|Win32|Haiku|$)/.test(navigator.platform),
     hardBreakItemRetreat: engine === 'blink' ? 'item' : engine === 'webkit' ? 'fit' : 'last-grapheme',
     paddedOpeningFit: engine === 'blink' ? 'start' : engine === 'webkit' ? 'placed' : 'both',
     emptyAtomicAlwaysFits: engine === 'gecko',
+    zeroWidthSpaceStaysAfterAtomic: engine === 'gecko',
     hangsSpacesPerTextFrame: engine === 'gecko',
     testsHyphenBeforeAtomic: engine !== 'webkit',
     transformsSegmentBreaksAcrossItems: engine === 'blink',
@@ -1108,18 +1199,12 @@ export function getSegmentFit(
   // When metrics measured seg together with one following U+0020, the width of
   // that space alone. The last grapheme then keeps its kerning with the space.
   followingSpaceWidth: number | null = null,
-  // Whether to find the segment's WebKit line-start prohibitions.
-  withLineStartProhibitions = false,
 ): SegmentFit {
   if (metrics.fit !== null && metrics.fit.mode === mode) return metrics.fit
   const profile = getEngineProfile()
   const ends = new Int32Array(seg.length)
   const count = findGraphemeEnds(profile.graphemeTable, seg, 0, seg.length, ends)
-  if (count <= 1) return metrics.fit = { mode, advances: null, lineStartExtras: null, lineStartProhibitions: null, entryGeometry: null }
-  let prohibitions: Uint8Array | null = null
-  if (withLineStartProhibitions) {
-    for (let i = 1; i < count; i++) if (!canWebKitLineStartWith(seg.charCodeAt(ends[i - 1]!))) (prohibitions ??= new Uint8Array(count))[i] = 1
-  }
+  if (count <= 1) return metrics.fit = { mode, advances: null, lineStartExtras: null }
   let advances: number[]
   let lineStartExtras: number[] | null = null
   // Whether each advance is of a grapheme measured after the one before it alone.
@@ -1174,7 +1259,7 @@ export function getSegmentFit(
       }
     }
   }
-  return metrics.fit = { mode, advances, lineStartExtras, lineStartProhibitions: prohibitions, entryGeometry: null }
+  return metrics.fit = { mode, advances, lineStartExtras }
 }
 
 // Moves the advance of each later letter of a ligature onto the ligature's first letter, in a
@@ -1275,9 +1360,10 @@ function measureFitAdvances(
 // prefixes and line-edge facts all come from that shaping. The context isn't touched
 // here: text that is all in the font's caches measures nothing (getContext).
 export function getFontMeasurement(font: string, language: string | null, letterSpaced: boolean): FontMeasurement {
-  // Preparation starts here, with the language it resolved. After that language
-  // changes, start again with a new context and empty caches; clearing the caches
-  // alone would re-measure with fonts resolved under the old language.
+  // Measuring starts here, for a text and for each item of a rich-inline paragraph, with the
+  // language the preparation resolved. After that language changes, start again with a new
+  // context and empty caches; clearing the caches alone would re-measure with fonts resolved
+  // under the old language.
   if (measureState === null || measureState.language !== language) measureState = createMeasureState(language)
   const state = measureState
   const shaped = letterSpaced && state.shapesLetterSpaced
@@ -1290,7 +1376,7 @@ export function getFontMeasurement(font: string, language: string | null, letter
   if (measurement === undefined) {
     const canvasFont = state.genericFamilies === null ? font : getCanvasFont(font, state.genericFamilies)
     if (!contextTakesFont(state.context, canvasFont)) throw new RangeError(`font must be a font string Canvas takes, a size in px then a family, such as 16px Inter, not "${font}"`)
-    measurement = { state, canvasFont, letterSpacing: shaped ? LETTER_SPACED_SHAPING : '0px', metrics: new Map(), followingSpaceMetrics: new Map(), spaceKerning: undefined, measuredKana: false, kanaKerning: undefined, kanaFont: canvasFont, emojiCorrection: null, emojiWidth: 0, hyphenText: null, spaceWidth: null, hanKerning: undefined, ligaturePairs: new Map() }
+    measurement = { state, canvasFont, letterSpacing: shaped ? LETTER_SPACED_SHAPING : '0px', metrics: new Map(), followingSpaceMetrics: new Map(), spaceKerning: undefined, measuredKana: false, kanaKerning: undefined, kanaFont: canvasFont, emojiCorrection: null, emojiWidth: 0, hyphenText: null, spaceWidth: null, hanKerning: undefined, ligaturePairs: new Map(), glyphCounts: new Map() }
     fonts.set(font, measurement)
   }
   return measurement
@@ -1324,8 +1410,7 @@ function contextTakesFont(context: CanvasRenderingContext2D | OffscreenCanvasRen
 // its context from here as it measures, so none reads a width under another font's
 // setting, whatever was looked up or prepared in between, and text that is all cached,
 // which measures nothing, sets nothing. What changes the context after that puts it back
-// before it returns (getHyphenText, measureWithLetterSpacing, getFontSpaceKerning,
-// isLigature).
+// before it returns (getHyphenText, getExtraSpacings, getFontSpaceKerning, isLigature).
 export function getContext(measurement: FontMeasurement): CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D {
   const state = measurement.state
   if (state.font !== measurement.canvasFont) state.context.font = state.font = measurement.canvasFont
@@ -1361,10 +1446,13 @@ function createMeasureState(language: string | null): MeasureState {
     shapesLetterSpaced: takesLetterSpacing && profile.canvasLetterSpacingDropsLigatures,
     fonts: new Map(),
     letterSpacedFonts: new Map(),
+    segments: 0,
   }
 }
 
 export function clearMeasurementCaches(): void {
-  measureState?.fonts.clear()
-  measureState?.letterSpacedFonts.clear()
+  if (measureState === null) return
+  measureState.fonts.clear()
+  measureState.letterSpacedFonts.clear()
+  measureState.segments = 0
 }

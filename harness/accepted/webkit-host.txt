@@ -1,19 +1,9 @@
 ## #421, "AV" nine times in 16 px Helvetica Neue at 85 px, a word cut twice: WebKit measures a line that starts inside a cut word from that line's own start (TextUtil::breakWord, TextUtil.cpp:242-365) and gives the rest of the word the width left over (AbstractLineBuilder.cpp:92-96), so its second line, whose nine letters measure 85.06 px alone, keeps eight; the library takes every line from the differences of the word's prefixes, in which that line's first "A" keeps its kerning with the "V" before it, so the nine are 84.32 px and fit; the rest of a cut word carries its width from line to line, which the cursor has no field for, so the rule isn't ported (the right line count, main too; ENGINE_FOLLOWUPS.md, Emergency breaks inside a word)
 report-aa5ba7c12d9ff140 breaks
 
-## A ZWSP that is a rich item, or starts one, right after a space, at 37-84 px, where the text before the space fits its line and the space doesn't: Safari ends the line after the space and starts the next with the ZWSP, which holds that line though it shows nothing where nothing follows it or the word after it doesn't fit beside it, in pre-wrap too, as WebKit keeps content that overflows only where it can be trimmed, hangs or is span tags alone (InlineContentBreaker.cpp:160-196) and a ZWSP is a text item (InlineTextItem.cpp:84-88); the text walkers hang the ZWSP with the space, so the library is a line short (ENGINE_FOLLOWUPS.md, Line edges)
-rich-3e2560b5cce34ec1 count
-rich-6eecbb3ad42d722d count
-rich-c613b39279a41fea count
-rich-d0104910d98009fb count
-rich-e16bbdd996294984 count
-
 ## A lone CR between letters in normal white space in 16 px Menlo, a font on WebKit's fixed-pitch shortcut, at 24 px and wider: Safari measures such text as its character count times a space, the CR counted (widthForSimpleTextWithFixedPitch, FontCascade.cpp:414-421), where the library takes the CR out of the text, so its line is a character narrow; main passed these with the CR as a space no line ends at, and the loss is accepted (RESEARCH.md, Decisions Log, 2026-10-06; ENGINE_FOLLOWUPS.md, White space and controls)
 facts-4bce41466e91ce4f breaks
 facts-aac4af3733ed6ee0 breaks
-
-## A padded rich item of a space and a ZWSP after a word, at 17-31 px, where the word fits its line and the item with its space doesn't: Safari ends the line after the word and gives the item the next line, which it holds though it shows nothing (not traced); the library hangs the item's space and its ZWSP on the word's line, a line short, as it hangs a ZWSP after a space outside a padded item (ENGINE_FOLLOWUPS.md, Rich-inline item edges)
-rich-940ad57a2e132532 count
 
 ## A padded rich item that holds only a ZWSP, at 56-80 px, where its start edge fits the line and its end edge doesn't: Safari keeps the item on a line only where both its edges fit, and else moves it down, with the word before it where no break comes before the item, as WebKit fits content one run between two wrap opportunities at a time, a span's tags with it (nextWrapOpportunity, InlineFormattingUtils.cpp:456-545); the library fits an item that opens with a ZWSP by its start edge (getOpeningFit in src/rich-inline.ts), so it keeps the item on the line and reports a line wider than the width given (ENGINE_FOLLOWUPS.md, Rich-inline item edges)
 rich-98a4a32dab5157bd count
@@ -33,6 +23,14 @@ rich-a2a218c7d76d7837 breaks
 ## A span of a soft hyphen between spaces after a word, at 24 px and wider: Safari keeps the space after the soft hyphen visible at the start of the next line, as it doesn't consume a soft hyphen at a line start, where the library consumes both (main and c09d264b too; ENGINE_FOLLOWUPS.md)
 rich-01312c32f1e8f3eb breaks
 
+## A vowel mark or accent after a soft hyphen or a ZWSP, at 24-41 px, since the mark context was removed, which measured a run of combining marks after a soft hyphen, a ZWSP, a word joiner or a control with the letter before it: Arabic and Hebrew letters with U+0650 or U+05B0 after a soft hyphen in Noto Naskh Arabic, and `a`, ZWSP, U+0301, a soft hyphen, U+0323, `b i` in a probe font, where Safari draws the mark as its Canvas measures it in place, on a dotted circle, up to 15.5 px wide, and the WebKit profile now measures the mark alone, with no advance, so its lines hold more than Safari's; no real-usage text has a mark after a soft hyphen or a ZWSP (ENGINE_FOLLOWUPS.md, Canvas answers that differ from the page)
+catalog-144c9bd1b61fb4fa breaks
+catalog-1d9abfd64cc62798 count
+catalog-2153e0521c8576d9 count
+catalog-35eabf5648a0b4d1 count
+catalog-431d7166167943e4 count
+catalog-92dff6c4d5b1ce0c count
+
 ## Arabic and Hebrew beside brackets, controls, U+FFFC or rich-item edges, at 24 px and wider: WebKit breaks there where the library doesn't
 catalog-09ea9f41ec2a80d9 count
 
@@ -44,11 +42,10 @@ facts-a4c1e6f899cbbc9a count
 facts-dcda28e48e677847 breaks
 
 ## Invisible format characters (soft hyphen, ZWSP, ZWJ, WJ, CGJ, bidi controls) beside spaces, tabs, marks or U+3000, at 24 px and wider: WebKit breaks around them where the library doesn't
-catalog-1041bf43db4daffb breaks
-catalog-1e0fe25b1784240a count
+catalog-1041bf43db4daffb count
 catalog-225df6d4902197bc count
 catalog-25e91c02bc492e09 breaks
-catalog-433d3cb68a016c07 count
+catalog-433d3cb68a016c07 breaks
 catalog-554a1bfaba27d946 count
 catalog-8d0c192d1d3329a2 breaks
 catalog-978bf3a5e4ce0ed3 breaks
@@ -62,16 +59,8 @@ catalog-7cffe66fa7484a1b count
 catalog-c87a1e216aa3a4ea count
 
 ## Letter-spacing across scripts (Thai, Arabic, Khmer, CJK, digits and hyphens) and in rich runs, at 24 px and wider: WebKit spaces or breaks these where the library doesn't
-catalog-0cd616621690d7a0 count
-catalog-2a27bdd629eb66ce count
 catalog-310f78fa2977df58 breaks
-catalog-6136ce5f0a531dfd count
 catalog-e2e532ee5e2beb22 count
-catalog-f59601a89eac943f count
-rich-78f0ac54ebcb9477 count
-
-## Lost against main before #340 (6d1d210), real usage: Khmer with ZWSPs at -0.2 px letter-spacing in a Segoe UI list, which macOS falls back past; the library moves the final "។" to a line of its own
-sample-2a86be3edfad28d8 count
 
 ## Lost against main before #340 (6d1d210), real usage: Urdu in Noto Nastaliq Urdu with an ICU message ("}other{"); WebKit doesn't break between the brace and the letter, the library does
 sample-edd96126ceff4f2c breaks
@@ -87,9 +76,6 @@ catalog-a257fc0a77f6904f breaks
 ## Lost against main before #340 (6d1d210): VT between digits in pre-wrap under keep-all at 1.5 px letter-spacing; WebKit gives the VT a width and breaks after it, the library doesn't
 catalog-9e5ce6d33e6164b7 count
 catalog-fcefd1ebd9ad1144 breaks
-
-## Lost against main before #340 (6d1d210): ZWSP and a combining mark before a long word at -4 px letter-spacing in pre-wrap; WebKit wraps the word's last letter, the library measures the line 3 px narrower and keeps it
-catalog-7e2a00fd3cd1ad70 count
 
 ## Lost against main before #340 (6d1d210): a slash before Arabic or Hebrew under keep-all (the engine fact at layout.test.ts:706); WebKit keeps the slash with the letter after it, the library breaks after the slash
 facts-739432684d495b51 count
@@ -180,13 +166,6 @@ facts-f4ed7850936e9108 count
 
 ## Real usage: Hebrew with a prefix before a Latin word (ל-Microsoft); WebKit breaks after the hyphen, the library doesn't (main before #340 too)
 sample-1562f53a72883442 breaks
-
-## Real usage: Khmer and Myanmar; WebKit's dictionary breaks differ from the library's (main before #340 too)
-sample-48b1ab52d386bd38 breaks
-
-## Real usage: Latin, Devanagari and Cyrillic with letter-spacing; one word lands on the other line (main before #340 too)
-sample-53ffbeedb28e3e2a breaks
-sample-863aac68305946bb breaks
 
 ## Real usage: Roboto, served as a web font, at -0.2 px letter-spacing; Safari turns the fi of "Notifikasi" off under letter spacing, where its Canvas letterSpacing keeps it, so the library's first line is 326.70 px at 327 px and keeps a word Safari wraps (main before #340 too; ENGINE_FOLLOWUPS.md, Letter spacing)
 sample-2f7ddc63b335c886 breaks
